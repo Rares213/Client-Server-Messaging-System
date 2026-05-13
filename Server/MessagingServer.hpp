@@ -14,11 +14,50 @@ namespace msgapp
 {
 	class MessagingServer;
 	class MessagingClientServer;
+	class MessagingPollRead;
 	class MessageProcessor;
 	class Broadcaster;
 
+	struct ClientMessageKind;
+	struct CollectionClientMessageKind;
+
 	using ClientsList = std::unordered_map<ID, MessagingClientServer>;
 	using PendingClient = std::pair<ID, MessagingClientServer>;
+
+	struct ClientMessageKind
+	{
+		MessageKind msg_kind = MessageKind::INVALID;
+		netw::ClientMessage msg;
+	};
+
+	struct CollectionClientMessageKind
+	{
+		std::vector<ClientMessageKind> msgs_kind;
+
+		void convertClientsMessages(netw::ClientsMessages& msgs)
+		{
+			for (netw::ClientMessage& msg : msgs)
+			{
+				const MessageKind msg_kind = (MessageKind)msg.buffer[0];
+				switch (msg_kind)
+				{
+				case MessageKind::CLIENT_REQUEST_MAX_CHAT_MSG_LEN:
+				case MessageKind::CLIENT_REQUEST_CHAT_HISTORY:
+				case MessageKind::CLIENT_REQUEST_CLIENTS_INFO:
+					msg.buffer.erase(msg.buffer.begin());
+					break;
+
+				case MessageKind::CLIENT_CHAT_MSG:
+					removeMessageHeader(msg.buffer);
+					break;
+
+				default: { LOG_INFO("Invalid message kind received: %", messageKindToString(msg_kind)) } continue;
+				}
+
+				msgs_kind.emplace_back(msg_kind, std::move(msg));
+			}
+		}
+	};
 
 	class MessagingClientServer : public MessagingClient
 	{
@@ -35,10 +74,27 @@ namespace msgapp
 
 	};
 	
+	class MessagingPollRead : public netw::PollRead
+	{
+	public:
+		virtual ~MessagingPollRead() {}
+
+		virtual netw::SBytes onPollRead(netw::ClientMessage& client_msg) override
+		{
+			char msg_type = 0;
+			
+			netw::SBytes result = netw::Recv(client_msg.socket_client, &msg_type, sizeof(char));
+			if (result > 0)
+			{
+
+			}
+		}
+	};
+
 	class MessagingServer : public netw::TCPServer
 	{
 	public:
-		MessagingServer(const char* port) : netw::TCPServer(getHints(), port) {}
+		MessagingServer(const char* port) : netw::TCPServer(getHints(), port), m_server_name("Server") {}
 		virtual ~MessagingServer() {}
 
 		MessagingClientServer* getClient(ID id) noexcept
@@ -119,6 +175,8 @@ namespace msgapp
 			TCPServer::removeClientPolling(client_socket, error);
 		}
 
+		const std::string_view getServerName() const { return m_server_name; }
+
 	protected:
 
 		void threadIncommingClients();
@@ -128,6 +186,8 @@ namespace msgapp
 		bool m_shutdown = false;
 		bool m_should_listening_block = false;
 		int m_listening_timeout = 1000;
+
+		std::string m_server_name;
 
 		std::jthread m_connection_thread;
 		std::jthread m_messaging_thread;
@@ -153,21 +213,6 @@ namespace msgapp
 			return hints;
 		}
 		
-		UserFate decideUserFate(MessagingClientServer& client)
-		{	
-			prot::ProtocolStatus status = prot::Protocols::connection(client);
-
-			if (status == prot::ProtocolStatus::SUCCESS)
-			{
-				return UserFate::ACCEPT;
-			}
-			else
-			{
-				return UserFate::REJECT;
-			}
-
-		}
-
 		void addClient(ID id, MessagingClientServer client)
 		{
 			const std::lock_guard lock(m_mut);
@@ -268,18 +313,34 @@ namespace msgapp
 		void setSeparator(const std::string& separator) noexcept { m_separator = separator; }
 
 		std::string_view getSeparator() const noexcept { return m_separator; }
-
-		void processMessage(netw::ClientsMessages& msgs)
+		bool hasMessagesPending() 
 		{
-			for (netw::ClientMessage& msg : msgs)
+			return !m_pending_messages.empty();
+		}
+
+		void processMessage(CollectionClientMessageKind& msgs)
+		{
+			for (ClientMessageKind& msg : msgs.msgs_kind)
 			{
-				processClientMessage(msg);
+				processMessageKind(msg);
+			}
+
+			const std::lock_guard<std::mutex> lock(m_mutex);
+			while (!m_pending_messages.empty())
+			{
+				ClientMessageKind& msg = m_pending_messages.front();
+
+				msgs.msgs_kind.push_back(std::move(msg));
+
+				m_pending_messages.pop();
 			}
 		}
 
-		void processMessage(netw::ClientMessage& msg)
+		void injectProcessedMessage(ClientMessageKind msg)
 		{
-			processClientMessage(msg);
+			const std::lock_guard<std::mutex> lock(m_mutex);
+
+			m_pending_messages.push(std::move(msg));
 		}
 
 	private:
@@ -287,103 +348,40 @@ namespace msgapp
 		MessagingServer& m_server;
 		std::string m_separator;
 
+		std::mutex m_mutex;
+		std::queue<ClientMessageKind> m_pending_messages;
+
 	private:
 
-		void processClientMessage(netw::ClientMessage& msg)
+		void processMessageKind(ClientMessageKind& msg)
 		{
-			unsigned char option = static_cast<unsigned char>(msg.buffer[0]);
-
-			if (option >= 10u && option <= 99u)
+			switch (msg.msg_kind)
 			{
-				{ LOG_INFO("Processing request % from %", requestToStr((Request)option), (ID)msg.socket_client) }
-
-				processRequest(msg, (Request)option);
-			}
-			else if (option >= 100)
-			{
-				{ LOG_INFO("Processing command % from %", commandToStr((Command)option), (ID)msg.socket_client) }
-
-				processCommand(msg, (Command)(option));
-			}
-			else
-			{
-				{ LOG_ERROR("Invalid byte from %. Byte was %", msg.socket_client, (unsigned char)msg.buffer[0]) }
-				msg.buffer.clear();
-				msg.buffer.push_back((char)Response::INVALID);
-			}
-		}
-
-		void processRequest(netw::ClientMessage& client_msg, Request request)
-		{
-			MessagingClientServer* client = m_server.getClient((ID)client_msg.socket_client);
-			if (client == nullptr)
-			{
-				{ LOG_ERROR("Client with ID % was not found to process request", client_msg.socket_client) }
-				client_msg.buffer[0] = (char)Response::INVALID;
-				return;
-			}
-
-			client_msg.buffer.clear();
-			switch (request)
-			{
-			case Request::MAX_CHAT_MSG_LEN:
-				processRequestMaxChatMsgLen(client_msg.buffer, m_server.getMaxChatLen());
-
-				{ LOG_INFO("Processed max chat message length request from %", client_msg.socket_client) }
+			case MessageKind::CLIENT_REQUEST_MAX_CHAT_MSG_LEN:
+				processRequestMaxChatMsgLen(msg.msg.buffer, m_server.getMaxChatLen());
 				break;
 
-			case Request::CLIENTS_INFO:
+			case MessageKind::CLIENT_REQUEST_CHAT_HISTORY:
+				processRequestChatHistory();
+				break;
+
+			case MessageKind::CLIENT_REQUEST_CLIENTS_INFO:
 			{
 				ClientsInfo info = m_server.getClientsInfo();
-				processRequestClientsInfo(client_msg, info);
-
-				{ LOG_INFO("Processed clients info request from %", client_msg.socket_client) }
+				processRequestClientsInfo(msg.msg, info);
 				break;
 			}
-
-			default:
-				client_msg.buffer.push_back((char)Response::INVALID);
-
-				{ LOG_INFO("Invalid request from %", client_msg.socket_client) }
-				return;
-			}
-
-			addMessageHeader((char)Response::ACCEPT, client_msg.buffer);
-		}
-
-		void processCommand(netw::ClientMessage& client_msg, Command cmd)
-		{
-			MessagingClientServer* client = m_server.getClient((ID)client_msg.socket_client);
-			if (client == nullptr)
+			case MessageKind::CLIENT_CHAT_MSG:
 			{
-				{ LOG_ERROR("Client with ID % was not found to process command", client_msg.socket_client) }
-				client_msg.buffer[0] = (char)Response::INVALID;
-				return;
-			}
-
-			//removeMessageHeader(client_msg.buffer);
-
-			switch (cmd)
-			{
-			case Command::CHAT_MSG:
-				client_msg.buffer.erase(client_msg.buffer.begin());
-				processChatMsg(client_msg, client->getName(), m_separator);
-
-				{ LOG_INFO("Processed chat message from %", client_msg.socket_client) }
+				const std::string& name = m_server.getClient((ID)msg.msg.socket_client)->getName();
+				processClientChatMsg(msg.msg, name, m_separator);
 				break;
-
-			default:
-				client_msg.buffer.clear();
-				client_msg.buffer.push_back((char)Response::INVALID);
-
-				{ LOG_INFO("Invalid command from %", client_msg.socket_client) }
-				return;
 			}
-
-			addMessageHeader((char)cmd, client_msg.buffer);
+			default: { LOG_INFO("Can't process message of kind %", messageKindToString(msg.msg_kind)) }
+			}
 		}
 
-		static void processChatMsg(netw::ClientMessage& client_msg, const std::string& client_name, std::string_view seperator)
+		static void processClientChatMsg(netw::ClientMessage& client_msg, const std::string& client_name, std::string_view seperator)
 		{
 			// the message send to all the client will be in the for
 			// [name][: ][message]
@@ -428,12 +426,10 @@ namespace msgapp
 			buffer.shrink_to_fit();
 		}
 
-	private:
+		// TO DO: implement
+		static void processRequestChatHistory() {}
 
-		static void processChatMsgAttachCommd(netw::SBuffer& buffer, size_t buffer_start_index, Command cmd)
-		{
-			buffer[buffer_start_index] = static_cast<char>(cmd);
-		}
+	private:
 
 		static void processChatMsgAttachName(netw::SBuffer& buffer, size_t buffer_start_index, const std::string& name)
 		{
@@ -457,77 +453,87 @@ namespace msgapp
 	public:
 		Broadcaster(MessagingServer& server) : m_server(server) {}
 
-		void broadcastMessages(netw::ClientsMessages& msgs)
+		void broadcastMessages(CollectionClientMessageKind& msgs)
 		{
-			for (netw::ClientMessage& msg : msgs)
+			for (ClientMessageKind& msg : msgs.msgs_kind)
 			{
 				broadcastMessage(msg);
 			}
-		}
-
-		void broadcastMessages(netw::ClientMessage& msg)
-		{
-			broadcastMessage(msg);
-		}
-
-		void serverBroadcastMessages(netw::SBuffer msg, ID user_except = netw::errs::NET_INVALID_SOCKET)
-		{
-			Command option = (Command)msg[0];
-
-			switch (option)
-			{
-			case Command::SERVER_MSG:
-			case Command::CLIENT_JOINED:
-			case Command::CLIENT_DISCONNECT:
-				for (auto& client : m_server.getClientsList())
-				{
-					if (user_except != netw::errs::NET_INVALID_SOCKET && user_except == client.second.getID())
-					{
-						continue;
-					}
-
-					client.second.sendMessage(msg);
-				}
-				break;
-
-			default: { LOG_ERROR("Invalid server message for broadcast. Command was: %", commandToStr(option)) }; break;
-			}
-
 		}
 
 	private:
 
 		MessagingServer& m_server;
 
-		void broadcastMessage(netw::ClientMessage& msg)
+		void broadcastMessage(ClientMessageKind& msg)
 		{
-			ClientsList& clients = m_server.getClientsList();
-			
-			unsigned char option = static_cast<unsigned char>(msg.buffer[0]);
+			switch (msg.msg_kind)
+			{
+			case MessageKind::CLIENT_REQUEST_MAX_CHAT_MSG_LEN: broadcastRequestMaxChatMsgLen(msg); break;
+			case MessageKind::CLIENT_REQUEST_CHAT_HISTORY: break;
+			case MessageKind::CLIENT_REQUEST_CLIENTS_INFO: broadcastRequestClientsInfo(msg); break;
 
-			if (option >= 0 && option <= 9)
-			{
-				ID id_client = static_cast<ID>(msg.socket_client);
-				MessagingClient& client = clients[id_client];
-				client.sendMessage(msg.buffer);
+			case MessageKind::CLIENT_CHAT_MSG: 
+			case MessageKind::SERVER_CHAT_MSG:
+			case MessageKind::SERVER_CLIENT_JOINED:
+			case MessageKind::SERVER_CLIENT_DISCONNECT:
+				replicateMessageToClients(msg);
+				break;
+			default: { LOG_ERROR("Invalid message kind for broadcast: %", messageKindToString(msg.msg_kind)) }
+
 			}
-			else if (option >= 100 && option <= 255)
+		}
+
+		void broadcastRequestMaxChatMsgLen(ClientMessageKind& msg)
+		{
+			MessagingClientServer* client = m_server.getClient((ID)msg.msg.socket_client);
+			if (client != nullptr)
 			{
-				for (auto& client_pair : clients)
+				const prot::ProtocolStatus status = prot::Protocols::responseMaximumChatMessageLength(*client, MessageKind::ACCEPT, &msg.msg.buffer);
+				if (status == prot::ProtocolStatus::FAILED)
 				{
-					if (client_pair.first != static_cast<ID>(msg.socket_client))
-					{
-						client_pair.second.sendMessage(msg.buffer);
-					}
+					{ LOG_ERROR("Failed to respond to maximum chat message length for %", msg.msg.socket_client) }
 				}
 			}
 			else
 			{
-				{ LOG_ERROR("Invalid message to broadcast: ID % | option %", msg.socket_client, option) }
+				{ LOG_ERROR("Client was null in broadcastRequestMaxChatMsgLen (somehow?).\nClient id: %", msg.msg.socket_client) }
 			}
-
 		}
 
+		void broadcastRequestClientsInfo(ClientMessageKind& msg)
+		{
+			MessagingClientServer* client = m_server.getClient((ID)msg.msg.socket_client);
+			if (client != nullptr)
+			{
+				const prot::ProtocolStatus status = prot::Protocols::responseClientsInfo(*client, MessageKind::ACCEPT, &msg.msg.buffer);
+				if (status == prot::ProtocolStatus::FAILED)
+				{
+					{ LOG_ERROR("Failed to respond to maximum chat message length for %", msg.msg.socket_client) }
+				}
+			}
+			else
+			{
+				{ LOG_ERROR("Client was null in broadcastRequestClientsInfo (somehow?).\nClient id: %", msg.msg.socket_client) }
+			}
+		}
+
+		/*
+		  Messages that should be send to all the clients, expect the socket in ClientMessage
+		*/
+		void replicateMessageToClients(ClientMessageKind& msg)
+		{
+			ClientsList& clients_list = m_server.getClientsList();
+			addMessageHeader((char) msg.msg_kind, msg.msg.buffer);
+
+			for (auto& client_pair : clients_list)
+			{
+				if ((ID)msg.msg.socket_client != client_pair.second.getID())
+				{
+					client_pair.second.sendMessage(msg.msg.buffer);
+				}
+			}
+		}
 	};
 
 	void MessagingServer::threadIncommingClients()
@@ -550,11 +556,9 @@ namespace msgapp
 				else
 				{
 					MessagingClientServer server_client(std::move(result.value()));
-					if (UserFate fate = decideUserFate(server_client); fate == UserFate::ACCEPT)
+					if (prot::Protocols::connection(server_client, nullptr) == prot::ProtocolStatus::SUCCESS)
 					{
 						{ LOG_INFO("User with ID % and name % accepted", server_client.getID(), server_client.getName()) }
-
-						server_client.sendSignal((char)Response::ACCEPT);
 
 						const ID id = server_client.getID();
 						const std::string name = server_client.getName();
@@ -564,8 +568,6 @@ namespace msgapp
 					else
 					{
 						{ LOG_INFO("User with ID % and name % rejected", server_client.getID(), server_client.getName()) }
-
-						server_client.sendSignal((char)Response::REJECT);
 					}
 				}
 			}
@@ -588,25 +590,32 @@ namespace msgapp
 				{ LOG_DEBUG("Waiting for messages...") }
 
 				netw::ClientsMessages msgs = pollSockets();
-				if (msgs.empty())
+				const bool has_msgs = !msgs.empty();
+				
+				bool has_msgs_pendings = false;
+				if (m_msg_processor != nullptr) has_msgs_pendings = m_msg_processor->hasMessagesPending();
+
+				if (has_msgs == true || has_msgs_pendings == true)
 				{
-					std::this_thread::sleep_for(TIMEOUT_MESSAGES);
-				}
-				else
-				{
+					CollectionClientMessageKind msgs_kind;
+					msgs_kind.convertClientsMessages(msgs);
+
 					if (m_msg_processor != nullptr)
 					{
 						{ LOG_DEBUG("Processing messages") }
-						m_msg_processor->processMessage(msgs);
+						m_msg_processor->processMessage(msgs_kind);
 					}
-
 
 					if (m_broadcaster != nullptr)
 					{
 						{ LOG_DEBUG("Sending messages") }
-						m_broadcaster->broadcastMessages(msgs);
+						m_broadcaster->broadcastMessages(msgs_kind);
 					}
 				}
+				else
+				{
+					std::this_thread::sleep_for(TIMEOUT_MESSAGES);
+				}	
 			}
 			catch (const std::system_error& error)
 			{
@@ -631,8 +640,6 @@ namespace msgapp
 		std::string server_msg("Server" + separator + name + " has connected.");
 		netw::SBuffer buffer = copyStrToSBuffer(server_msg);
 
-		addMessageHeader((char)Command::SERVER_MSG, buffer);
-
 		return buffer;
 	}
 
@@ -651,8 +658,6 @@ namespace msgapp
 		std::string server_msg("Server" + separator + name + " has disconnected.");
 		netw::SBuffer buffer = copyStrToSBuffer(server_msg);
 
-		addMessageHeader((char)Command::SERVER_MSG, buffer);
-
 		return buffer;
 	}
 
@@ -668,7 +673,6 @@ namespace msgapp
 		std::copy(name_size_bytes.begin(), name_size_bytes.end(), client_joined_msg.begin() + id_bytes.size());
 		std::copy(name_bytes.begin(), name_bytes.end(), client_joined_msg.begin() + id_bytes.size() + name_size_bytes.size());
 
-		addMessageHeader((char)Command::CLIENT_JOINED, client_joined_msg);
 		return client_joined_msg;
 	}
 
@@ -679,7 +683,6 @@ namespace msgapp
 		netw::SBuffer client_disc_msg(id_bytes.size());
 		std::copy(id_bytes.begin(), id_bytes.end(), client_disc_msg.begin());
 
-		addMessageHeader((char)Command::CLIENT_DISCONNECT, client_disc_msg);
 		return client_disc_msg;
 	}
 
@@ -689,14 +692,21 @@ namespace msgapp
 		{
 			return;
 		}
-		
-		netw::SBuffer new_client_chat_msg = createNewClientJoinedChatMessage(client.getName());
-		netw::SBuffer new_client_notification = createNewClientNotification(client.getID(), client.getName());
+	
+		ClientMessageKind new_client_chat_msg;
+		new_client_chat_msg.msg_kind = MessageKind::SERVER_CHAT_MSG;
+		new_client_chat_msg.msg.socket_client = client.getSockHandle();
+		new_client_chat_msg.msg.buffer = createNewClientJoinedChatMessage(client.getName());
 
-		if (m_broadcaster != nullptr)
+		ClientMessageKind new_client_notification;
+		new_client_notification.msg_kind = MessageKind::SERVER_CLIENT_JOINED;
+		new_client_notification.msg.socket_client = client.getSockHandle();
+		new_client_notification.msg.buffer = createNewClientNotification(client.getID(), client.getName());
+
+		if (m_msg_processor != nullptr)
 		{
-			m_broadcaster->serverBroadcastMessages(new_client_notification, client.getID());
-			m_broadcaster->serverBroadcastMessages(new_client_chat_msg, client.getID());
+			m_msg_processor->injectProcessedMessage(std::move(new_client_chat_msg));
+			m_msg_processor->injectProcessedMessage(std::move(new_client_notification));
 		}
 	}
 
@@ -707,13 +717,20 @@ namespace msgapp
 			return;
 		}
 		
-		netw::SBuffer client_disc_notification = createClientDisconnectNotification(client.getID());
-		netw::SBuffer client_disc_chat_msg = createClientDisconnectChatMessage(client.getName());
+		ClientMessageKind disconnected_client_chat_msg;
+		disconnected_client_chat_msg.msg_kind = MessageKind::SERVER_CHAT_MSG;
+		disconnected_client_chat_msg.msg.socket_client = client.getSockHandle();
+		disconnected_client_chat_msg.msg.buffer = createClientDisconnectChatMessage(client.getName());
 
-		if (m_broadcaster != nullptr)
+		ClientMessageKind disconnected_client_notification;
+		disconnected_client_notification.msg.socket_client = client.getSockHandle();
+		disconnected_client_notification.msg_kind = MessageKind::SERVER_CLIENT_DISCONNECT;
+		disconnected_client_notification.msg.buffer = createClientDisconnectNotification(client.getID());
+
+		if (m_msg_processor != nullptr)
 		{
-			m_broadcaster->serverBroadcastMessages(client_disc_notification, client.getID());
-			m_broadcaster->serverBroadcastMessages(client_disc_chat_msg, client.getID());
+			m_msg_processor->injectProcessedMessage(std::move(disconnected_client_chat_msg));
+			m_msg_processor->injectProcessedMessage(std::move(disconnected_client_notification));
 		}
 	}
 

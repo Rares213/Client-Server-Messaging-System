@@ -399,8 +399,25 @@ namespace netw
 
     struct ClientMessage
     {
-        Socket_t socket_client;
+        Socket_t socket_client = errs::NET_INVALID_SOCKET;
         SBuffer buffer;
+    };
+
+    /*
+      Interface to modify how data is read into buffers for pollSockets.
+    */
+    class PollRead
+    {
+    public:
+        virtual ~PollRead() {}
+
+        /*
+          Implement this method to add your own way to read the data into buffers.
+          This method will be completely responsible all the reads.
+          The method should return the number of bytes that have been read to ensure
+          correct error checking.
+        */
+        virtual SBytes onPollRead(ClientMessage& client_msg) = 0;
     };
 
     class TCPServer
@@ -553,8 +570,8 @@ namespace netw
             Socket_t m_socket_h = errs::NET_INVALID_SOCKET;
         };
 
-        
         static inline int32_t MAX_MSG_LEN = 512;
+
         
         protected:
 
@@ -563,42 +580,54 @@ namespace netw
 
         std::vector<pollfd> m_polls;
 
+        std::unique_ptr<PollRead> m_poll_read_mod;
+
         ClientsMessages getMessages(int num_polls_revents)
         {
             ClientsMessages msgs;
             msgs.reserve(num_polls_revents);
             
-            SBuffer recv_msg_buffer(MAX_MSG_LEN, '\0');
-
             for(size_t index_fd = 0; index_fd < m_polls.size();)
             {
-                if(m_polls[index_fd].revents != 0)
+                // current poll
+                pollfd& c_poll = m_polls[index_fd];
+                
+                if(c_poll.revents != 0)
                 {
-                    if(m_polls[index_fd].revents & POLLHUP )
+                    if(c_poll.revents & POLLHUP )
                     {
-                        removeClientPolling(m_polls[index_fd].fd, POLLHUP);
+                        removeClientPolling(c_poll.fd, POLLHUP);
                     }
-                    else if (m_polls[index_fd].revents & POLLERR)
+                    else if (c_poll.revents & POLLERR)
                     {
-                        removeClientPolling(m_polls[index_fd].fd, POLLERR);
+                        removeClientPolling(c_poll.fd, POLLERR);
                     }
-                    else if(m_polls[index_fd].revents & POLLIN)
+                    else if(c_poll.revents & POLLIN)
                     {
-                        if(SBytes result = Recv(m_polls[index_fd].fd, recv_msg_buffer.data(), recv_msg_buffer.size()); result > 0)
+                        ClientMessage client_msg{ .socket_client = c_poll.fd };
+                        SBytes result = 0;
+
+                        if (m_poll_read_mod != nullptr)
                         {
-                            SBuffer client_msg;
-                            client_msg.reserve(result);
-                            for (size_t i = 0; i < result; ++i)
-                            {
-                                client_msg.push_back(recv_msg_buffer[i]);
-                            }
-                            
-                            msgs.push_back( { m_polls[index_fd].fd, std::move(client_msg) } );
-                            ++index_fd;
+                            result = m_poll_read_mod->onPollRead(client_msg);
                         }
-                        else if(result == errs::NET_CONN_DOWN)
+                        else
                         {
-                            removeClientPolling(m_polls[index_fd].fd, errs::NET_CONN_DOWN);
+                            result = fallbackReadPoll(client_msg);
+                        }
+
+                        if (result == errs::NET_SOCKET_ERROR)
+                        {
+                            removeClientPolling(c_poll.fd, errs::NET_SOCKET_ERROR);
+                        }
+                        else if (result == errs::NET_CONN_DOWN)
+                        {
+                            removeClientPolling(c_poll.fd, errs::NET_CONN_DOWN);
+                        }
+                        else
+                        {
+                            msgs.push_back(std::move(client_msg));
+                            ++index_fd;
                         }
                     }
                 }
@@ -609,6 +638,20 @@ namespace netw
             }
             
             return msgs;
+        }
+
+        static SBytes fallbackReadPoll(ClientMessage& client_msg)
+        {
+            SBuffer recv_msg_buffer(MAX_MSG_LEN, '\0');
+
+            const SBytes result = Recv(client_msg.socket_client, recv_msg_buffer.data(), recv_msg_buffer.size());
+            
+            SBuffer msg(result);
+            std::memcpy(msg.data(), recv_msg_buffer.data(), result * sizeof(char));
+
+            client_msg.buffer = std::move(msg);
+
+            return result;
         }
 
     };

@@ -11,8 +11,6 @@
 
 namespace msgapp
 {
-	
-	
 	class ClientUser : public MessagingClient
 	{
 	public:
@@ -31,10 +29,11 @@ namespace msgapp
 		*/
 		void sendChatMessage(const std::vector<char>& msg)
 		{
-			netw::SBuffer buffer;
-			buffer.reserve(sizeof(Command) + msg.size());
+			{ LOG_INFO("Send message to server: %", std::string(msg.data(), msg.size())) }
 
-			buffer.push_back((char)Command::CHAT_MSG);
+			netw::SBuffer buffer;
+			buffer.reserve(msg.size());
+
 			for (size_t i = 0; i < msg.size(); ++i)
 			{
 				if (msg[i] == '\0')
@@ -45,8 +44,9 @@ namespace msgapp
 				buffer.push_back(msg[i]);
 			}
 			buffer.shrink_to_fit();
+			addMessageHeader((char)MessageKind::CLIENT_CHAT_MSG, buffer);
 
-			if (netw::SBytes result = sendMessage(buffer); result == netw::errs::NET_SOCKET_ERROR)
+			if (netw::SBytes result = sendMessage(buffer); CHECK_RESULT(result))
 			{
 				SYSTEM_ERROR("Failed to send message")
 			}
@@ -121,7 +121,7 @@ namespace msgapp
 		return hints;
 	}
 
-	std::expected<ClientUser, Response> connectToMessagingServer(std::string_view name, std::string_view ip)
+	std::expected<ClientUser, MessageKind> connectToMessagingServer(std::string_view name, std::string_view ip)
 	{
 		addrinfo hints = getHints();
 
@@ -135,9 +135,8 @@ namespace msgapp
 		}
 		else
 		{
-			return std::unexpected(Response::REJECT);
+			return std::unexpected(MessageKind::REJECT);
 		}
-
 	}
 	
 	enum class STATE
@@ -327,7 +326,7 @@ namespace msgapp
 		Connected() {}
 		Connected(ClientUser user) : m_user(std::move(user))
 		{
-			std::expected<uint32_t, prot::ProtocolStatus> result = prot::Protocols::maximumChatMessageLength(m_user);
+			std::expected<uint32_t, prot::ProtocolStatus> result = prot::Protocols::requestMaximumChatMessageLength(m_user);
 			if (result.has_value())
 			{
 				{ LOG_INFO("Chat message max length is %", (int)result.value()) }
@@ -340,7 +339,7 @@ namespace msgapp
 
 			try
 			{
-				std::expected<ClientsInfo, prot::ProtocolStatus> result = prot::Protocols::clientsInfo(m_user);
+				std::expected<ClientsInfo, prot::ProtocolStatus> result = prot::Protocols::requestClientsInfo(m_user);
 				if (result.has_value())
 				{
 					{ LOG_INFO("Received clients info") }
@@ -507,11 +506,11 @@ namespace msgapp
 			}
 			else
 			{
-				const Command cmd = (Command)value.first;
-				switch (cmd)
+				const MessageKind msg = (MessageKind)value.first;
+				switch (msg)
 				{
-				case Command::CHAT_MSG:
-				case Command::SERVER_MSG:
+				case MessageKind::CLIENT_CHAT_MSG:
+				case MessageKind::SERVER_CHAT_MSG:
 				{
 					const MsgSize msg_chat_size = value.second;
 					
@@ -520,7 +519,7 @@ namespace msgapp
 					m_chat_msgs.push_back(std::move(chat_msg));
 					break;
 				}
-				case Command::CLIENT_JOINED:
+				case MessageKind::SERVER_CLIENT_JOINED:
 				{
 					ClientInfo info = m_user.readNewClientInfo();
 
@@ -528,7 +527,7 @@ namespace msgapp
 					break;
 				}
 
-				case Command::CLIENT_DISCONNECT:
+				case MessageKind::SERVER_CLIENT_DISCONNECT:
 				{
 					ID id = m_user.readClientDisconnect();
 
@@ -582,9 +581,9 @@ namespace msgapp
 
 		void run()
 		{
-			try
+			while (!gui::GUI::shouldClose())
 			{
-				while (!gui::GUI::shouldClose())
+				try
 				{
 					gui::GUI::pollEvents();
 
@@ -602,19 +601,24 @@ namespace msgapp
 					ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 					gui::GUI::updateScreen();
 				}
-			}
-			catch (const std::exception& error)
-			{
-				{ LOG_ERROR(error.what()) }
-				if (m_con != nullptr)
+				catch (const std::exception& error)
 				{
-					m_con.reset();
-				}
+					{ LOG_ERROR(error.what()) }
+					if (m_con != nullptr)
+					{
+						m_con.reset();
+					}
 
-				m_active_state = m_unc.get();
-				m_unc->passError(error.what());
+					m_active_state = m_unc.get();
+					m_unc->passError(error.what());
+
+					// finish imgui stuff or else crash
+					ImGui::Render();
+					gui::GUI::clearScreen();
+					ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+					gui::GUI::updateScreen();
+				}
 			}
-			
 		}
 
 
@@ -655,7 +659,7 @@ namespace msgapp
 		{
 			try
 			{
-				std::expected<ClientUser, Response> result = connectToMessagingServer(m_unc->getName(), m_unc->getIP());
+				std::expected<ClientUser, MessageKind> result = connectToMessagingServer(m_unc->getName(), m_unc->getIP());
 				if (result.has_value())
 				{
 					if (m_con == nullptr)

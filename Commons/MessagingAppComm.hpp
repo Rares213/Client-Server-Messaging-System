@@ -11,48 +11,42 @@
 
 namespace msgapp
 {
+	class MessagingClient;
+	struct ClientInfo;
+	class ClientsInfo;
+	
+	using ID = uint64_t;
+	using MsgSize = uint64_t;
+	using MsgHeaderValues = std::pair<char, MsgSize>;
+
 	constexpr size_t NAME_LEN = 15u;
 	constexpr std::string_view PORT = "30802";
-
-	class MessagingClient;
+	constexpr size_t headerSize = sizeof(char) + sizeof(MsgSize);
 
 	enum class UserFate { ACCEPT, REJECT };
 
-	using ID = uint64_t;
-	
-	using MsgSize = uint64_t;
-	using MsgHeaderValues = std::pair<char, MsgSize>;
-	constexpr size_t headerSize = sizeof(char) + sizeof(MsgSize);
+	enum class Authority : unsigned char { NONE, SERVER, CLIENT };
 
-
-	// 0-9
-	enum class Response : unsigned char
+	enum class MessageKind : unsigned char
 	{
 		INVALID,
 		ACCEPT,
 		REJECT,
-		TIMEOUT
-	};
-	// 10 - 99
-	enum class Request : unsigned char
-	{
-		MAX_CHAT_MSG_LEN = 10,
-		CHAT_HISTORY,
-		CLIENTS_INFO,
-		CLIENT_NAME,
-		NEW_NAME
+		TIMEOUT,
+
+		CLIENT_REQUEST_MAX_CHAT_MSG_LEN,
+		CLIENT_REQUEST_CHAT_HISTORY,
+		CLIENT_REQUEST_CLIENTS_INFO,
+
+		SERVER_REQUEST_CLIENT_NAME,
+
+		CLIENT_CHAT_MSG,
+		SERVER_CHAT_MSG,
+		SERVER_CLIENT_JOINED,
+		SERVER_CLIENT_DISCONNECT
 	};
 
-	// 100 - 255
-	// these should always be replicated to all
-	// the chat members
-	enum class Command : unsigned char
-	{
-		CHAT_MSG = 100,
-		SERVER_MSG,
-		CLIENT_JOINED,
-		CLIENT_DISCONNECT
-	};
+	MsgHeaderValues getMessageHeader(std::array<char, headerSize> header_bytes);
 
 	struct ClientInfo
 	{
@@ -217,21 +211,6 @@ namespace msgapp
 
 	};
 
-	MsgHeaderValues getMessageHeader(std::array<char, headerSize> header_bytes)
-	{
-		MsgHeaderValues values;
-		values.first = header_bytes[0];
-
-		netw::bytes_t<MsgSize> size_bytes;
-		std::copy(header_bytes.begin() + 1, header_bytes.end(), size_bytes.begin());
-
-		values.second = netw::deserializeType<MsgSize>(size_bytes);
-
-		return values;
-	}
-
-	enum class Authority : unsigned char { NONE, SERVER, CLIENT };
-
 	class MessagingClient : public netw::Client
 	{
 	public:
@@ -244,14 +223,6 @@ namespace msgapp
 			setBlocking(true); 
 		}
 
-		MessagingClient(Authority authority, const std::string& name, netw::Client client) 
-			: 
-			netw::Client(std::move(client)), 
-			m_name(name), 
-			m_authority(authority)
-		{ 
-			setBlocking(true); 
-		}
 		virtual ~MessagingClient() {}
 
 		MessagingClient(MessagingClient&& other) noexcept : netw::Client(std::move(other))
@@ -261,11 +232,6 @@ namespace msgapp
 
 			other.m_authority = Authority::NONE;
 		}
-
-		void setName(const std::string& name) { m_name = name; }
-		const std::string& getName() const { return m_name; }
-
-		ID getID() const noexcept { return (ID)getSockHandle(); }
 
 		netw::SBytes readMessageHeader(MsgHeaderValues& values)
 		{
@@ -279,6 +245,11 @@ namespace msgapp
 
 		Authority getAuthority() const noexcept { return m_authority; }
 
+		void setName(const std::string& name) { m_name = name; }
+		const std::string& getName() const { return m_name; }
+
+		ID getID() const noexcept { return (ID)getSockHandle(); }
+
 	protected:
 
 		std::string m_name;
@@ -288,6 +259,19 @@ namespace msgapp
 		Authority m_authority = Authority::NONE;
 	};
 	
+	MsgHeaderValues getMessageHeader(std::array<char, headerSize> header_bytes)
+	{
+		MsgHeaderValues values;
+		values.first = header_bytes[0];
+
+		netw::bytes_t<MsgSize> size_bytes;
+		std::copy(header_bytes.begin() + 1, header_bytes.end(), size_bytes.begin());
+
+		values.second = netw::deserializeType<MsgSize>(size_bytes);
+
+		return values;
+	}
+
 	/*
 	  Copies the contents of buffer in str
 	*/
@@ -334,77 +318,38 @@ namespace msgapp
 		return buffer;
 	}
 
-	/*
-	  Checks if response is in range for Response enum
-	*/
-	bool isResponse(unsigned char response) noexcept
+	constexpr std::string_view authorityToString(Authority auth)
 	{
-		if (response >= 0 && response <= 9) 
+		switch (auth)
 		{
-			return true;
-		}
-		else
-		{
-			return false;
+		case Authority::NONE:   return "NONE";
+		case Authority::CLIENT: return "CLIENT";
+		case Authority::SERVER: return "SERVER";
+
+		default: return "NOT SPECIFIED";
 		}
 	}
 
-	/*
-	  Checks if the first byte corresponds to a request enum
-	  Return false if buffer is empty
-	*/
-	bool isRequest(Request request, const netw::SBuffer& buffer) noexcept
+	constexpr std::string_view messageKindToString(MessageKind msg)
 	{
-		if (buffer.size() > 0u)
+		switch (msg)
 		{
-			if (buffer[0] == (char)request) 
-			{
-				return true;
-			}
-		}
+		case MessageKind::INVALID:                         return "INVALID";
+		case MessageKind::ACCEPT:                          return "ACCEPT";
+		case MessageKind::REJECT:                          return "REJECT";
+		case MessageKind::TIMEOUT:                         return "TIMEOUT";
 
-		return false;
-	}
+		case MessageKind::CLIENT_REQUEST_MAX_CHAT_MSG_LEN: return "CLIENT_REQUEST_MAX_CHAT_MSG_LEN";
+		case MessageKind::CLIENT_REQUEST_CHAT_HISTORY:     return "CLIENT_REQUEST_CHAT_HISTORY";
+		case MessageKind::CLIENT_REQUEST_CLIENTS_INFO:     return "CLIENT_REQUEST_CLIENTS_INFO";
+		case MessageKind::SERVER_REQUEST_CLIENT_NAME:      return "SERVER_REQUEST_CLIENT_NAME";
 
-	std::string_view requestToStr(Request request)
-	{
-		switch (request)
-		{
-		case Request::MAX_CHAT_MSG_LEN:
-			return "MAX CHAT MESSAGE LENGTH";
+		case MessageKind::CLIENT_CHAT_MSG:                 return "CLIENT_CHAT_MSG";
+		case MessageKind::SERVER_CHAT_MSG:                 return "SERVER_CHAT_MSG";
+		case MessageKind::SERVER_CLIENT_JOINED:            return "SERVER_CLIENT_JOINED";
+		case MessageKind::SERVER_CLIENT_DISCONNECT:        return "SERVER_CLIENT_DISCONNECT";
 
-		case Request::CHAT_HISTORY:
-			return "CHAT HISTORY";
-
-		case Request::CLIENTS_INFO:
-			return "CLIENTS INFO";
-
-		case Request::CLIENT_NAME:
-			return "CLIENT NAME";
-
-		case Request::NEW_NAME:
-			return "NEW NAME";
-
-		default:
-			return "NOT IMPLEMENTED";
-		}
-	}
-
-	std::string_view commandToStr(Command cmd)
-	{
-		switch (cmd)
-		{
-		case Command::CHAT_MSG:
-			return "CHAT_MSG";
-
-		case Command::CLIENT_JOINED:
-			return "CLIENT_JOINED";
-
-		case Command::CLIENT_DISCONNECT:
-			return "CLIENT_DISCONNECTED";
-
-		default:
-			return "NOT IMPLEMENTED";
+		default: return "NOT IMPLEMENTED";
 		}
 	}
 
