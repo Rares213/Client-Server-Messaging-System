@@ -376,6 +376,7 @@ namespace netw
         }
 
         Socket_t socket = errs::NET_INVALID_SOCKET;
+        int error = 0;
         for (addrinfo* info = address; info != NULL; info = info->ai_next)
         {
             socket = Socket(info->ai_family, info->ai_socktype, info->ai_protocol);
@@ -388,12 +389,16 @@ namespace netw
             if (int result = Connect(socket, info->ai_addr, info->ai_addrlen); result == errs::NET_SOCKET_ERROR)
             {
                 // TO DO: add callback
-                int error = lastError();
+                error = lastError();
                 Close(socket);
                 socket = errs::NET_INVALID_SOCKET;
                 continue;
             }
             break;
+        }
+        if (socket == errs::NET_INVALID_SOCKET)
+        {
+            SYSTEM_ERROR_NUM(error, "Server failed to respond to request")
         }
 
         return Client(socket);
