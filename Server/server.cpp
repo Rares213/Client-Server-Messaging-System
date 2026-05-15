@@ -23,6 +23,8 @@ int main()
 
         messaging_server.run();
         cmd_menu.runMenu();
+
+        messaging_server.stopListening();
     }
     catch(const std::system_error& err)
     {

@@ -335,14 +335,14 @@ namespace netw
         }
 
         /*
-        * Get the native handle of he socket
+          Get the native handle of he socket.
         */
         Socket_t getSockHandle() const noexcept { return m_socket_h; } 
 
         /*
-        * Set if the socekt should be blocking or not
-        * true - block
-        * false - non-blocking
+          Set if the socekt should be blocking or not
+          true - block
+          false - non-blocking
         */
         int setBlocking(bool should_block) noexcept { return setBlockingSocket(m_socket_h, should_block); }
 
@@ -385,7 +385,7 @@ namespace netw
 
             if (int result = Connect(socket, info->ai_addr, info->ai_addrlen); result == errs::NET_SOCKET_ERROR)
             {
-                // add callback
+                // TO DO: add callback
                 int error = lastError();
                 Close(socket);
                 socket = errs::NET_INVALID_SOCKET;
@@ -413,7 +413,7 @@ namespace netw
 
         /*
           Implement this method to add your own way to read the data into buffers.
-          This method will be completely responsible all the reads.
+          This method will be completely responsible for all the reads.
           The method should return the number of bytes that have been read to ensure
           correct error checking.
         */
@@ -455,6 +455,11 @@ namespace netw
             m_listen_socket.setBlocking(should_block);
         }
 
+        void stopListening()
+        {
+            m_listen_socket.stop();
+        }
+
         // return a Client or int with WOULDBLOCK if listen socket is set to be non-blocking
         // else throws system_error 
         std::expected<Client, int> acceptConnection()
@@ -477,7 +482,7 @@ namespace netw
 
                     if (error == EAGAIN || error == errs::NET_WOULDBLOCK)
                     {
-                        return NET_WOULDBLOCK;
+                        return std::unexpected(NET_WOULDBLOCK);
                     }
                 #endif
 
@@ -519,6 +524,11 @@ namespace netw
             {
                 SYSTEM_ERROR("Poll failed")
             }
+        }
+
+        void setPollRead(std::unique_ptr<PollRead> poll_read)
+        {
+            m_poll_read_mod = std::move(poll_read);
         }
 
         protected:
@@ -565,6 +575,15 @@ namespace netw
                 return Accept(m_socket_h);
             }
 
+            void stop()
+            {
+                if (m_socket_h != errs::NET_INVALID_SOCKET)
+                {
+                    Close(m_socket_h);
+                    m_socket_h = errs::NET_INVALID_SOCKET;
+                }
+            }
+
             private:
 
             Socket_t m_socket_h = errs::NET_INVALID_SOCKET;
@@ -572,7 +591,6 @@ namespace netw
 
         static inline int32_t MAX_MSG_LEN = 512;
 
-        
         protected:
 
         addrinfo* m_server = nullptr;
@@ -633,7 +651,7 @@ namespace netw
                 }
                 else
                 {
-                    index_fd++;
+                    ++index_fd;
                 }
             }
             
@@ -656,6 +674,10 @@ namespace netw
 
     };
 
+    /*
+      Takes as input a parameter of type T
+      and converts it into an array of bytes.
+    */
     template<typename T>
     std::array<char, sizeof(T)> serializeType(T src)
     {

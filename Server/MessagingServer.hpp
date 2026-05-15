@@ -44,11 +44,8 @@ namespace msgapp
 				case MessageKind::CLIENT_REQUEST_MAX_CHAT_MSG_LEN:
 				case MessageKind::CLIENT_REQUEST_CHAT_HISTORY:
 				case MessageKind::CLIENT_REQUEST_CLIENTS_INFO:
-					msg.buffer.erase(msg.buffer.begin());
-					break;
-
 				case MessageKind::CLIENT_CHAT_MSG:
-					removeMessageHeader(msg.buffer);
+					msg.buffer.erase(msg.buffer.begin());
 					break;
 
 				default: { LOG_INFO("Invalid message kind received: %", messageKindToString(msg_kind)) } continue;
@@ -77,6 +74,7 @@ namespace msgapp
 	class MessagingPollRead : public netw::PollRead
 	{
 	public:
+		MessagingPollRead(MessagingServer& server) : m_server(server) {}
 		virtual ~MessagingPollRead() {}
 
 		virtual netw::SBytes onPollRead(netw::ClientMessage& client_msg) override
@@ -86,15 +84,55 @@ namespace msgapp
 			netw::SBytes result = netw::Recv(client_msg.socket_client, &msg_type, sizeof(char));
 			if (result > 0)
 			{
+				const MessageKind msg_kind = MessageKind(msg_type);
+				
+				switch (msg_kind)
+				{
+				case MessageKind::CLIENT_REQUEST_MAX_CHAT_MSG_LEN:
+				case MessageKind::CLIENT_REQUEST_CHAT_HISTORY:
+				case MessageKind::CLIENT_REQUEST_CLIENTS_INFO:
+					client_msg.buffer.push_back((char)msg_kind);
+					break;
 
+				case MessageKind::CLIENT_CHAT_MSG:
+					if(netw::SBytes chat_msg_result = readClientChatMessage(client_msg); CHECK_RESULT(chat_msg_result))
+					{
+						return chat_msg_result;
+					}
+					client_msg.buffer.insert(client_msg.buffer.begin(), msg_type);
+					break;
+
+				// the client shouldn't be able to send and invalid message kind
+				// this place should not be reachable
+				default: 
+					{ LOG_ERROR("Invalid message kind from %", client_msg.socket_client) } 
+					return netw::errs::NET_SOCKET_ERROR;
+				}
+				client_msg.buffer.shrink_to_fit();
 			}
+
+			return result;
 		}
+
+	protected:
+
+		MessagingServer& m_server;
+
+		/*
+		  TO DO: maybe this Recv should be non-blocking.
+		  If a client sends a signal with this message kind,
+		  the thread will block.
+		*/
+		netw::SBytes readClientChatMessage(netw::ClientMessage& client_msg);
 	};
 
 	class MessagingServer : public netw::TCPServer
 	{
 	public:
-		MessagingServer(const char* port) : netw::TCPServer(getHints(), port), m_server_name("Server") {}
+		MessagingServer(const char* port) : netw::TCPServer(getHints(), port), m_server_name("Server") 
+		{
+			setPollRead(std::make_unique<MessagingPollRead>(*this));
+		}
 		virtual ~MessagingServer() {}
 
 		MessagingClientServer* getClient(ID id) noexcept
@@ -157,7 +195,7 @@ namespace msgapp
 				return;
 			}
 
-			deleteClient(id);
+
 		}
 
 		virtual netw::ClientsMessages pollSockets(int timeout = 0) override
@@ -165,7 +203,16 @@ namespace msgapp
 			handleDeletionQueue();
 			handlePendings();
 
-			return netw::TCPServer::pollSockets(timeout);
+			if (m_polls.empty())
+			{
+				const std::chrono::milliseconds TIMEOUT_MESSAGES(timeout);
+				std::this_thread::sleep_for(TIMEOUT_MESSAGES);
+				return netw::ClientsMessages();
+			}
+			else
+			{
+				return netw::TCPServer::pollSockets(timeout);
+			}
 		}
 
 		virtual void removeClientPolling(netw::Socket_t client_socket, int error) override
@@ -184,7 +231,7 @@ namespace msgapp
 		void threadIncomingMessages();
 
 		bool m_shutdown = false;
-		bool m_should_listening_block = false;
+		bool m_should_listening_block = true;
 		int m_listening_timeout = 1000;
 
 		std::string m_server_name;
@@ -575,21 +622,23 @@ namespace msgapp
 			{
 				LOG_ERROR(error.what())
 			}
+			catch (const std::exception& error)
+			{
+				LOG_ERROR(error.what())
+			}
 		}
 		{ LOG_INFO("Thread incoming users exiting...") }
 	}
 
 	void MessagingServer::threadIncomingMessages()
 	{
-		std::chrono::milliseconds TIMEOUT_MESSAGES(m_listening_timeout);
-
 		while (!m_shutdown)
 		{
 			try
 			{
 				{ LOG_DEBUG("Waiting for messages...") }
 
-				netw::ClientsMessages msgs = pollSockets();
+				netw::ClientsMessages msgs = pollSockets(m_listening_timeout);
 				const bool has_msgs = !msgs.empty();
 				
 				bool has_msgs_pendings = false;
@@ -612,13 +661,10 @@ namespace msgapp
 						m_broadcaster->broadcastMessages(msgs_kind);
 					}
 				}
-				else
-				{
-					std::this_thread::sleep_for(TIMEOUT_MESSAGES);
-				}	
 			}
 			catch (const std::system_error& error)
 			{
+				
 				{ LOG_ERROR(error.what()) }
 			}
 		}
@@ -663,15 +709,15 @@ namespace msgapp
 
 	netw::SBuffer MessagingServer::createNewClientNotification(ID id, std::string_view name)
 	{
-		netw::bytes_t<ID>      id_bytes = netw::serializeType(id);
+		netw::bytes_t<ID>      id_bytes        = netw::serializeType(id);
 		netw::bytes_t<uint8_t> name_size_bytes = netw::serializeType((uint8_t)name.size());
-		netw::SBuffer          name_bytes = netw::serializeBasicStr(name.data());
+		netw::SBuffer          name_bytes      = netw::serializeBasicStr(name.data());
 
 		netw::SBuffer client_joined_msg(id_bytes.size() + name_size_bytes.size() + name_bytes.size());
 
-		std::copy(id_bytes.begin(), id_bytes.end(), client_joined_msg.begin());
+		std::copy(id_bytes.begin(),        id_bytes.end(),        client_joined_msg.begin());
 		std::copy(name_size_bytes.begin(), name_size_bytes.end(), client_joined_msg.begin() + id_bytes.size());
-		std::copy(name_bytes.begin(), name_bytes.end(), client_joined_msg.begin() + id_bytes.size() + name_size_bytes.size());
+		std::copy(name_bytes.begin(),      name_bytes.end(),      client_joined_msg.begin() + id_bytes.size() + name_size_bytes.size());
 
 		return client_joined_msg;
 	}
@@ -732,6 +778,41 @@ namespace msgapp
 			m_msg_processor->injectProcessedMessage(std::move(disconnected_client_chat_msg));
 			m_msg_processor->injectProcessedMessage(std::move(disconnected_client_notification));
 		}
+	}
+
+	netw::SBytes MessagingPollRead::readClientChatMessage(netw::ClientMessage& client_msg)
+	{
+		netw::SBytes result = 0;
+
+		netw::bytes_t<MsgSize> msg_len_bytes;
+		if (netw::SBytes len_bytes_result = netw::Recv(client_msg.socket_client, msg_len_bytes.data(), msg_len_bytes.size()); CHECK_RESULT(len_bytes_result))
+		{
+			return len_bytes_result;
+		}
+		else
+		{
+			result += len_bytes_result;
+		}
+		const MsgSize msg_len = netw::deserializeType<MsgSize>(msg_len_bytes);
+		if (msg_len > m_server.getMaxChatLen())
+		{
+			// remove client if size is too big
+			return netw::errs::NET_SOCKET_ERROR;
+		}
+
+		netw::SBuffer msg_buffer(msg_len);
+		if (netw::SBytes buffer_result = netw::Recv(client_msg.socket_client, msg_buffer.data(), msg_buffer.size()); CHECK_RESULT(buffer_result))
+		{
+			return buffer_result;
+		}
+		else
+		{
+			result += buffer_result;
+		}
+
+		client_msg.buffer = std::move(msg_buffer);
+
+		return result;
 	}
 
 };
