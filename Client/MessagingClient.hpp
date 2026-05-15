@@ -546,6 +546,12 @@ namespace msgapp
 			}
 
 			m_user.sendChatMessage(m_msg);
+
+			std::string msg_str;
+			copySBufferToStr(m_msg, msg_str);
+			std::string format_msg("You: " + msg_str);
+			m_chat_msgs.push_back(format_msg);
+
 			clearUserMsg();
 		}
 
@@ -591,7 +597,7 @@ namespace msgapp
 					ImGui_ImplGlfw_NewFrame();
 					ImGui::NewFrame();
 
-					ImGui::ShowDemoWindow();
+					//ImGui::ShowDemoWindow();
 
 					STATE state = m_active_state->runState();
 					evaluateState(state);
