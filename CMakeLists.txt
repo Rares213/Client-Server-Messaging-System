@@ -75,7 +75,7 @@ if(COMPILE_CLIENT)
 	target_compile_features(client PRIVATE cxx_std_23)
 
 	if(MSVC)
-		#target_compile_options(client PRIVATE /O2)
+		target_compile_options(client PRIVATE /O2)
 	elseif(GNU)
 		target_compile_options(client PRIVATE -O2)
 	endif()

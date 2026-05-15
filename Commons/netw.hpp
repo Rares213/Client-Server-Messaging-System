@@ -398,7 +398,7 @@ namespace netw
         }
         if (socket == errs::NET_INVALID_SOCKET)
         {
-            SYSTEM_ERROR_NUM(error, "Server failed to respond to request")
+            SYSTEM_ERROR_NUM(error, "Server failed to respond to accept")
         }
 
         return Client(socket);
