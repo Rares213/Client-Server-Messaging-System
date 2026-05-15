@@ -484,7 +484,7 @@ namespace netw
 
                     if (error == EAGAIN || error == errs::NET_WOULDBLOCK)
                     {
-                        return std::unexpected(NET_WOULDBLOCK);
+                        return std::unexpected(errs::NET_WOULDBLOCK);
                     }
                 #endif
 

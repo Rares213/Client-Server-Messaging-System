@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MessagingAppComm.hpp"
+#include <thread>
 
 namespace msgapp
 {
