@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <queue>
 #include <exception>
@@ -25,6 +26,7 @@
     #pragma comment (lib, "Mswsock.lib")
     #pragma comment (lib, "AdvApi32.lib")
 #else
+    #include <unistd.h>
     #include <sys/types.h>
     #include <sys/socket.h>
     #include <netdb.h>
