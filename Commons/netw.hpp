@@ -52,11 +52,15 @@ namespace netw
         using SBytes = ssize_t;
     #endif
 
-    class ClientMessage;
+    // Contains the socket that has received a message
+    // and a buffer with the message.
+    struct ClientMessage;
 
+    // Serialized buffer. Used to send data over a network.
     using SBuffer = std::vector<char>;
     using ClientsMessages = std::vector<ClientMessage>;
     
+    // Array that holds the bytes of a type.
     template<typename T>
     using bytes_t = std::array<char, sizeof(T)>;
     
@@ -81,6 +85,8 @@ namespace netw
 
     SBuffer initBuffer(size_t size) { return SBuffer('\0', size); }
 
+    // Initializes network stuff.
+    // Should be called before any network operations.
     void initNetw()
     {
         #ifdef _WIN32
@@ -95,6 +101,7 @@ namespace netw
         #endif
     }
 
+    // Cleans network stuff.
     void cleanup()
     {
         #ifdef _WIN32
@@ -242,6 +249,7 @@ namespace netw
         virtual void deserialize(SBuffer& data) = 0;
     };
 
+    // Represents one end of a network connection.
     class Client
     {   
     public:
@@ -356,7 +364,9 @@ namespace netw
     /*
         Throws system_error if:
         - can't get address info;
-        - can't create a socket.
+        - can't create a socket;
+        - server doens't respond
+        to connect request.
 
         May also throw bad_alloc if there's not enough memory
         to allocate internal structures.
