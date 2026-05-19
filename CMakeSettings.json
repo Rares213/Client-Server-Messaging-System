@@ -13,7 +13,7 @@
       "variables": [
         {
           "name": "COMPILE_TESTS",
-          "value": "False",
+          "value": "True",
           "type": "BOOL"
         }
       ]

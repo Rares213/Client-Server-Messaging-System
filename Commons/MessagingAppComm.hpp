@@ -233,6 +233,16 @@ namespace msgapp
 			other.m_authority = Authority::NONE;
 		}
 
+		void operator=(MessagingClient&& other) noexcept
+		{
+			m_name = other.m_name;
+			m_authority = other.m_authority;
+
+			other.m_authority = Authority::NONE;
+
+			Client::operator=(std::move(other));
+		}
+
 		netw::SBytes readMessageHeader(MsgHeaderValues& values)
 		{
 			std::array<char, headerSize> header_bytes;
@@ -240,6 +250,22 @@ namespace msgapp
 
 			values = getMessageHeader(header_bytes);
 
+			return result;
+		}
+
+		netw::SBytes readMessageKind(MessageKind& msg_kind)
+		{
+			char msg = '\0';
+			netw::SBytes result = receiveMessageRaw(&msg, sizeof(char));
+			if(CHECK_RESULT(result))
+			{
+				msg_kind = MessageKind::INVALID;
+			}
+			else
+			{
+				msg_kind = (MessageKind)msg;
+			}
+			
 			return result;
 		}
 
@@ -296,6 +322,11 @@ namespace msgapp
 			str.push_back(buffer[i]);
 		}
 		str.shrink_to_fit();
+	}
+
+	std::string copySBufferToStr(const netw::SBuffer& buffer)
+	{
+		return std::string(buffer.begin(), buffer.end());
 	}
 
 	/*

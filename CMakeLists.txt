@@ -14,23 +14,19 @@ elseif(GNU)
 	add_compile_options(-Wextra -Wall)
 endif()
 
-option(COMPILE_TESTS "Compile the tests" OFF)
+option(COMPILE_TESTS "Compile the tests" ON)
 option(COMPILE_CLIENT "Compile the client side" ON)
 option(COMPILE_SERVER "Compile the server side" ON)
-
-if(COMPILE_TESTS)
-	message("COMPILING THE TESTS")
-	add_executable(testApp Tests/test.cpp)
-	target_compile_features(testApp PRIVATE cxx_std_23)
-	target_compile_options(testApp PRIVATE /O2)
-endif()
 
 if(COMPILE_SERVER)
 	message("COMPILING THE SERVER SIDE")
 	add_executable(server Server/server.cpp)
 	target_compile_features(server PRIVATE cxx_std_23)
 	if(MSVC)
-		target_compile_options(server PRIVATE /O2)
+		if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+			message("COMPILING SERVER WITH /02")
+			target_compile_options(server PRIVATE /O2)
+		endif()
 	elseif(GNU)
 		target_compile_options(server PRIVATE -O2)
 	endif()
@@ -75,9 +71,59 @@ if(COMPILE_CLIENT)
 	target_compile_features(client PRIVATE cxx_std_23)
 
 	if(MSVC)
-		target_compile_options(client PRIVATE /O2)
+		if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+			message("COMPILING CLIENT WITH /02")
+			target_compile_options(client PRIVATE /O2)
+		endif()
 	elseif(GNU)
 		target_compile_options(client PRIVATE -O2)
 	endif()
 endif()
 
+if(COMPILE_TESTS)
+	message("COMPILING THE TESTS")
+	add_executable(testApp Tests/test.cpp)
+
+	target_sources(testApp
+		PRIVATE
+			imgui/imgui.cpp
+			imgui/imgui_demo.cpp
+			imgui/imgui_draw.cpp
+			imgui/imgui_impl_glfw.cpp
+			imgui/imgui_impl_opengl3.cpp
+			imgui/imgui_tables.cpp
+			imgui/imgui_widgets.cpp
+	
+		PUBLIC
+			FILE_SET imguiHeaders
+			BASE_DIRS
+				imgui
+			TYPE HEADERS
+			FILES
+				imgui/imgui.h
+				imgui/imgui_impl_glfw.h
+				imgui/imgui_impl_opengl3.h
+				imgui/imgui_impl_opengl3_loader.h
+				imgui/imgui_internal.h
+	
+		INTERFACE
+			imgui/imconfig.h
+			imgui/imstd_textedit.h
+			imgui/imstd_rectpack.h
+			imgui/imstb_truetype.h
+	)
+
+	target_link_libraries(testApp PRIVATE depenslib glfw3lib)
+
+	target_compile_features(testApp PRIVATE cxx_std_23)
+	if(MSVC)
+		if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+			message("COMPILING TESTS WITH /02")
+			target_compile_options(testApp PRIVATE /O2)
+		endif()
+	elseif(GNU)
+		target_compile_options(testApp PRIVATE -O2)
+	endif()
+
+
+endif()
