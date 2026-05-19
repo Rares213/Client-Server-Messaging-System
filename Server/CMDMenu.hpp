@@ -83,6 +83,14 @@ namespace cmdm
 						}
 					}
 				}
+				else if (option == "timer")
+				{
+					m_server.setDeltaTimer();
+				}
+				else if (option == "timer off")
+				{
+					m_server.stopTimer();
+				}
 
 			} while (!m_shutdown);
 		}
@@ -110,6 +118,7 @@ namespace cmdm
 				"3. Kick user\nCommand: kick [id]\n\n" <<
 				"4. Log level\nCommand: log [nr] -- DEBUG=0 INFO=1 WARNING=2 ERROR=3 CRITICAL=4\n\n" <<
 				"5. Clear console\nCommand: clear, cls\n\n" <<
+				"6. Timer\nCommand: timer, timer off (stops)\n\n" <<
 				std::endl;
 		}
 

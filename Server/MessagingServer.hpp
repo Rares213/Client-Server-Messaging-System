@@ -4,6 +4,8 @@
 #include "../Commons/logger.hpp"
 #include "../Commons/MessagingAppComm.hpp"
 #include "../Commons/Protocols.hpp"
+#include "../Commons/Timer.hpp"
+
 
 #include <thread>
 #include <cstdlib>
@@ -17,6 +19,7 @@ namespace msgapp
 	class MessagingPollRead;
 	class MessageProcessor;
 	class Broadcaster;
+	class TimerMessagesCompleted;
 
 	struct ClientMessageKind;
 	struct CollectionClientMessageKind;
@@ -28,6 +31,39 @@ namespace msgapp
 	{
 		MessageKind msg_kind = MessageKind::INVALID;
 		netw::ClientMessage msg;
+	};
+
+	class TimerMessagesCompleted : public timer::Timeable
+	{
+	public:
+
+		virtual ~TimerMessagesCompleted() {}
+
+		virtual void onTimerUp() override
+		{
+			uint64_t msg_count = m_messages_count.exchange(0u);
+			{ LOG_INFO("% messages completed in % ms", msg_count, m_delta.load(std::memory_order_relaxed)) }
+		}
+
+		void setDelta(int delta) 
+		{ 
+			if (delta < 0)
+			{
+				m_delta.store(timer::DEFAULT_DELTA, std::memory_order_relaxed);
+			}
+			else
+			{
+				m_delta.store(delta, std::memory_order_relaxed); 
+			}
+
+		}
+
+		void incrementMessageCount() noexcept { ++m_messages_count; }
+
+	private:
+
+		std::atomic_int m_delta = timer::DEFAULT_DELTA;
+		std::atomic_uint64_t m_messages_count = 0u;
 	};
 
 	struct CollectionClientMessageKind
@@ -194,8 +230,6 @@ namespace msgapp
 			{
 				return;
 			}
-
-
 		}
 
 		virtual netw::ClientsMessages pollSockets(int timeout = 0) override
@@ -224,6 +258,26 @@ namespace msgapp
 
 		const std::string_view getServerName() const { return m_server_name; }
 
+		void setDeltaTimer(int delta = -1)
+		{
+			if (m_timer == nullptr)
+			{
+				m_timer = std::make_unique<timer::TimerMessagesProcessed>();
+				m_timeable_messages = std::make_shared<TimerMessagesCompleted>();
+
+				m_timer->addTimeable(m_timeable_messages);
+			}
+
+			m_timer->setDelta(delta);
+			m_timeable_messages->setDelta(delta);
+		}
+
+		void stopTimer()
+		{
+			m_timeable_messages.reset();
+			m_timer.reset();
+		}
+
 	protected:
 
 		void threadIncommingClients();
@@ -247,6 +301,9 @@ namespace msgapp
 
 		MessageProcessor* m_msg_processor = nullptr;
 		Broadcaster* m_broadcaster = nullptr;
+
+		std::unique_ptr<timer::TimerMessagesProcessed> m_timer;
+		std::shared_ptr<TimerMessagesCompleted> m_timeable_messages;
 
 		static addrinfo getHints()
 		{
@@ -536,11 +593,8 @@ namespace msgapp
 			MessagingClientServer* client = m_server.getClient((ID)msg.msg.socket_client);
 			if (client != nullptr)
 			{
-				const prot::ProtocolStatus status = prot::Protocols::responseMaximumChatMessageLength(*client, MessageKind::ACCEPT, &msg.msg.buffer);
-				if (status == prot::ProtocolStatus::FAILED)
-				{
-					{ LOG_ERROR("Failed to respond to maximum chat message length for %", msg.msg.socket_client) }
-				}
+				addMessageHeader((char)MessageKind::CLIENT_REQUEST_MAX_CHAT_MSG_LEN, msg.msg.buffer);
+				client->sendMessage(msg.msg.buffer);
 			}
 			else
 			{
@@ -553,11 +607,8 @@ namespace msgapp
 			MessagingClientServer* client = m_server.getClient((ID)msg.msg.socket_client);
 			if (client != nullptr)
 			{
-				const prot::ProtocolStatus status = prot::Protocols::responseClientsInfo(*client, MessageKind::ACCEPT, &msg.msg.buffer);
-				if (status == prot::ProtocolStatus::FAILED)
-				{
-					{ LOG_ERROR("Failed to respond to maximum chat message length for %", msg.msg.socket_client) }
-				}
+				addMessageHeader((char)MessageKind::CLIENT_REQUEST_CLIENTS_INFO, msg.msg.buffer);
+				client->sendMessage(msg.msg.buffer);
 			}
 			else
 			{
@@ -646,6 +697,8 @@ namespace msgapp
 
 				if (has_msgs == true || has_msgs_pendings == true)
 				{
+					// increment number request
+
 					CollectionClientMessageKind msgs_kind;
 					msgs_kind.convertClientsMessages(msgs);
 
@@ -660,6 +713,12 @@ namespace msgapp
 						{ LOG_DEBUG("Sending messages") }
 						m_broadcaster->broadcastMessages(msgs_kind);
 					}
+
+					if (m_timeable_messages != nullptr)
+					{
+						m_timeable_messages->incrementMessageCount();
+					}
+
 				}
 			}
 			catch (const std::system_error& error)

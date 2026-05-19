@@ -14,8 +14,12 @@ int main(int argc, char** argv)
 
 	gui::GUI::initGUI(win_spec);
 
-	msgapp::MessagingClientSide messaging_client;
-	messaging_client.run();
+	msgapp::MessagingClientSide msg_client;
+	msgapp::MessagingClientGUI client_gui;
+
+	client_gui.setMessagingClient(msg_client);
+
+	client_gui.runUI();
 
 	return 0;
 }

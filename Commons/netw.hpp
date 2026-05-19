@@ -52,6 +52,8 @@ namespace netw
         using SBytes = ssize_t;
     #endif
 
+    enum class ShutdownType : int { READ, WRITE, BOTH };
+
     // Contains the socket that has received a message
     // and a buffer with the message.
     struct ClientMessage;
@@ -72,6 +74,7 @@ namespace netw
             constexpr long NET_WOULDBLOCK = WSAEWOULDBLOCK;
             constexpr int NET_SOCKET_ERROR = SOCKET_ERROR;
             constexpr int NET_CONN_DOWN = 0;
+            constexpr int NET_CONN_RESET = WSAECONNRESET;
 
         #else
 
@@ -79,6 +82,7 @@ namespace netw
             constexpr long NET_WOULDBLOCK = EWOULDBLOCK;
             constexpr int NET_SOCKET_ERROR = -1;
             constexpr int NET_CONN_DOWN = 0;
+            constexpr int NET_CONN_RESET = ECONNRESET;
 
         #endif
     }
@@ -169,7 +173,7 @@ namespace netw
 
     Socket_t Accept(Socket_t socket) noexcept
     {
-        Socket_t result = ::accept(socket, NULL, NULL);
+        Socket_t result = accept(socket, NULL, NULL);
         if(result != -1)
         {
             return result;
@@ -240,6 +244,30 @@ namespace netw
         #endif
     }
 
+    // check if last error is caused by a non-blocking socket
+    bool isNonBlockingError(int error)
+    {
+        #ifdef _WIN32
+            if (error == errs::NET_WOULDBLOCK)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        #else
+            if (error == EAGAIN || error == errs::NET_WOULDBLOCK)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        #endif
+    }
+
     class Serializable
     {
     public:
@@ -280,6 +308,17 @@ namespace netw
         Client(const Client& other) = delete;
         void operator=(const Client& other) = delete;
 
+        int shutdownClient(ShutdownType how)
+        {
+            return shutdown(m_socket_h, (int)how);
+        }
+
+        int closeClient()
+        {
+            const int result = Close(m_socket_h);
+            m_socket_h = errs::NET_INVALID_SOCKET;
+            return result;
+        }
 
         /*
           Return the numbers of bytes send,
@@ -489,19 +528,10 @@ namespace netw
             else
             {
                 int error = lastError();
-
-                #ifdef _WIN32
-                    if (error == errs::NET_WOULDBLOCK)
-                    {
-                        return std::unexpected(error);
-                    }
-                #else
-
-                    if (error == EAGAIN || error == errs::NET_WOULDBLOCK)
-                    {
-                        return std::unexpected(errs::NET_WOULDBLOCK);
-                    }
-                #endif
+                if (isNonBlockingError(error) == true)
+                {
+                    return std::unexpected(errs::NET_WOULDBLOCK);
+                }
 
                 SYSTEM_ERROR_NUM(error, "Accept failed")
             }
